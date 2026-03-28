@@ -8,7 +8,7 @@ from langchain_core.messages import SystemMessage
 from pydantic import BaseModel, Field
 
 from agents.context import system_context
-from agents.prompting import record_prompt_snapshot
+from agents.prompting import invoke_structured_output, record_prompt_snapshot
 from harness.base import AgentHarness, ContractViolationError, RecoverableHarnessError
 from agents.prompts import imaging_system_prompt, imaging_user_prompt
 from schemas.imaging import ArticleWithImages, GeneratedImage
@@ -61,7 +61,6 @@ class ImagingAgentHarness(AgentHarness[TechnicalArticleDraft, ArticleWithImages]
 
         sys_content = system_context(state=state, node=self.node) + "\n\n" + imaging_system_prompt()
         sys = SystemMessage(content=sys_content)
-        structured = self._llm.with_structured_output(_PromptOut)
 
         md = input.markdown
         images: list[GeneratedImage] = []
@@ -75,7 +74,11 @@ class ImagingAgentHarness(AgentHarness[TechnicalArticleDraft, ArticleWithImages]
                 system_prompt=sys_content,
                 user_prompt=prompt_in,
             )
-            p = structured.invoke([sys, {"role": "user", "content": prompt_in}])
+            p = invoke_structured_output(
+                llm=self._llm,
+                schema=_PromptOut,
+                messages=[sys, {"role": "user", "content": prompt_in}],
+            )
 
             anchor_token = f"[[FIG:{fr.figure_id}:{fr.paragraph_anchor}]]"
             success = False

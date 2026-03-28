@@ -37,3 +37,6 @@ logs/
 
 *.sqlite3
 
+# Local dependency target dir (pip --target)
+.pydeps/
+

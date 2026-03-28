@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MyTeam-Blog</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-title">MyTeam-Blog</div>
+          <div class="brand-sub">多 Agent 深度研究与写作</div>
+        </div>
+        <div class="sidebar-actions">
+          <button id="newRunBtn" class="btn btn-primary">新建对话</button>
+        </div>
+        <div class="runs" id="runs"></div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="status">
+            <span class="dot" id="healthDot"></span>
+            <span id="healthText">检查服务中…</span>
+          </div>
+          <div class="meta" id="modelMeta"></div>
+        </header>
+
+        <section class="chat">
+          <div class="panels">
+            <div class="panel">
+              <div class="panel-title">任务状态面板</div>
+              <div class="panel-body" id="taskPanelBody">未选择任务</div>
+            </div>
+            <div class="panel">
+              <div class="panel-title">依赖 / 调度</div>
+              <div class="panel-body" id="depsPanelBody">-</div>
+            </div>
+          </div>
+          <div class="messages" id="messages"></div>
+          <div class="composer">
+            <textarea
+              id="goalInput"
+              placeholder="输入研究目标（最终输出为中文），例如：调研 Agent Harness Enginnering 的未来发展趋势"
+              rows="3"
+            ></textarea>
+            <div class="composer-actions">
+              <button id="startBtn" class="btn btn-primary">开始生成</button>
+              <button id="stopBtn" class="btn btn-ghost" disabled>停止轮询</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="output">
+          <div class="output-header">
+            <div class="output-title">最终文档（Markdown）</div>
+            <div class="output-actions">
+              <button id="copyBtn" class="btn btn-ghost" disabled>复制</button>
+            </div>
+          </div>
+          <pre class="output-body" id="finalMarkdown"></pre>
+        </section>
+      </main>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

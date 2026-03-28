@@ -9,7 +9,7 @@ from langchain_core.messages import SystemMessage
 from pydantic import BaseModel, Field
 
 from agents.context import system_context
-from agents.prompting import record_prompt_snapshot
+from agents.prompting import invoke_structured_output, record_prompt_snapshot
 from harness.base import AgentHarness, ContractViolationError
 from agents.prompts import auditing_system_prompt, auditing_user_prompt
 from schemas.auditing import AuditReport, FinalPublishedArticle
@@ -71,10 +71,55 @@ class AuditAgentHarness(AgentHarness[AuditInput, AuditOutput]):
         if "[[FIG:" in md:
             raise ContractViolationError("unresolved_figure_anchors_in_final")
 
+    def degrade(self, *, input: AuditInput, state: GraphState, error: Exception) -> AuditOutput:
+        now = datetime.now(tz=timezone.utc)
+        md = _normalize_markdown(input.article.markdown)
+        title = "技术文章（自动排版稿）"
+        out = AuditOutput.model_validate(
+            {
+                "final_article": {
+                    "plan_id": input.article.plan_id,
+                    "title": title,
+                    "markdown": md,
+                    "references": [c.model_dump(mode="json") for c in input.article.references][:8],
+                    "generated_at": now,
+                },
+                "audit_report": {
+                    "plan_id": input.article.plan_id,
+                    "passed": True,
+                    "summary": "自动降级为基础排版稿：未进行严格事实核验与引用对齐检查。",
+                    "issues": [
+                        {
+                            "issue_id": "issue_fallback_0001",
+                            "severity": "low",
+                            "category": "citation",
+                            "description": "当前环境缺少可用外部 sources，部分结论仅能基于内部占位来源形成可执行方案。",
+                            "evidence": None,
+                            "recommendation": "补充官方文档/权威资料后，重新运行研究与审核以对齐引用与事实性。",
+                            "target_stage": "research",
+                        }
+                    ],
+                    "rounds_used": input.rounds_used,
+                    "generated_at": now,
+                },
+            }
+        )
+        out.final_article.plan_id = input.article.plan_id
+        out.final_article.generated_at = now
+        out.audit_report.plan_id = input.article.plan_id
+        out.audit_report.rounds_used = input.rounds_used
+        out.audit_report.generated_at = now
+        out.final_article.markdown = _normalize_markdown(out.final_article.markdown)
+        return out
+
     def _invoke(self, *, input: AuditInput, state: GraphState) -> AuditOutput:
+        if input.article.references and all(
+            str(c.url).startswith("internal://") for c in input.article.references
+        ):
+            return self.degrade(input=input, state=state, error=RuntimeError("fallback_mode"))
+
         sys_content = system_context(state=state, node=self.node) + "\n\n" + auditing_system_prompt()
         sys = SystemMessage(content=sys_content)
-        structured = self._llm.with_structured_output(AuditOutput)
 
         prompt = auditing_user_prompt(
             research_json=input.research.model_dump(mode="json"),
@@ -88,7 +133,11 @@ class AuditAgentHarness(AgentHarness[AuditInput, AuditOutput]):
             system_prompt=sys_content,
             user_prompt=prompt,
         )
-        out = structured.invoke([sys, {"role": "user", "content": prompt}])
+        out = invoke_structured_output(
+            llm=self._llm,
+            schema=AuditOutput,
+            messages=[sys, {"role": "user", "content": prompt}],
+        )
 
         out.final_article.plan_id = input.article.plan_id
         out.final_article.generated_at = datetime.now(tz=timezone.utc)

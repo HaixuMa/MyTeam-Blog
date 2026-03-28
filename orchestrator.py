@@ -181,15 +181,30 @@ class HarnessOrchestrator:
         graph.add_edge("publish", END)
 
         sqlite_url = f"sqlite:///{self._cfg.checkpoint_sqlite_path.as_posix()}"
-        from langgraph.checkpoint.sqlite import SqliteSaver
-
+        checkpointer = None
         try:
-            checkpointer = SqliteSaver.from_conn_string(sqlite_url)
-        except AttributeError:
-            import sqlite3
+            from langgraph.checkpoint.sqlite import SqliteSaver
 
-            conn = sqlite3.connect(self._cfg.checkpoint_sqlite_path)
-            checkpointer = SqliteSaver(conn)
+            try:
+                checkpointer = SqliteSaver.from_conn_string(sqlite_url)
+            except AttributeError:
+                import sqlite3
+
+                conn = sqlite3.connect(self._cfg.checkpoint_sqlite_path)
+                checkpointer = SqliteSaver(conn)
+        except ModuleNotFoundError:
+            try:
+                from langgraph.checkpoint.memory import MemorySaver
+
+                checkpointer = MemorySaver()
+                self._logger.warning(
+                    "langgraph.checkpoint.sqlite missing; falling back to in-memory checkpointer (no persistence)"
+                )
+            except Exception:
+                checkpointer = None
+
+        if checkpointer is None:
+            return graph.compile()
         return graph.compile(checkpointer=checkpointer)
 
     def _bump_loop_guard(self, *, state: GraphState, node: str) -> bool:
@@ -453,8 +468,12 @@ class HarnessOrchestrator:
                 logger=self._logger,
                 allowed_tools=user_goal.allowed_tools,
                 rate_limit_per_minute=self._cfg.tool_rate_limit_per_minute,
-                openai_api_key_present=bool(self._cfg.openai_api_key)
-                and self._cfg.model_provider == "openai",
+                api_key=self._cfg.openai_api_key,
+                image_provider=self._cfg.image_provider,
+                image_model=self._cfg.image_model,
+                image_base_url=self._cfg.image_base_url,
+                image_poll_interval_s=self._cfg.image_poll_interval_s,
+                image_max_poll_seconds=self._cfg.image_max_poll_seconds,
                 data_dir=self._cfg.data_dir,
                 request_timeout_s=self._cfg.request_timeout_s,
             )

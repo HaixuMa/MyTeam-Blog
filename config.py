@@ -22,6 +22,12 @@ class AppConfig:
     model_extra_body: dict[str, object] | None
     request_timeout_s: float
 
+    image_provider: str
+    image_model: str
+    image_base_url: str | None
+    image_poll_interval_s: float
+    image_max_poll_seconds: int
+
     tavily_api_key: str | None
     openai_api_key: str | None
     anthropic_api_key: str | None
@@ -85,13 +91,7 @@ def load_config(project_root: Path) -> AppConfig:
         os.getenv("CHECKPOINT_SQLITE_PATH", str(data_dir / "checkpoints.sqlite3"))
     ).resolve()
 
-    extra_body = _env_json_dict("MODEL_EXTRA_BODY_JSON") or {}
-    enable_thinking = _env_bool("MODEL_ENABLE_THINKING")
-    if enable_thinking is not None:
-        extra_body["enable_thinking"] = enable_thinking
-    thinking_budget = os.getenv("MODEL_THINKING_BUDGET")
-    if thinking_budget is not None and thinking_budget.strip() != "":
-        extra_body["thinking_budget"] = int(thinking_budget)
+    extra_body = _env_json_dict("MODEL_EXTRA_BODY_JSON")
     model_extra_body = extra_body or None
 
     return AppConfig(
@@ -105,6 +105,11 @@ def load_config(project_root: Path) -> AppConfig:
         model_base_url=os.getenv("MODEL_BASE_URL") or None,
         model_extra_body=model_extra_body,
         request_timeout_s=_env_float("REQUEST_TIMEOUT_S", 60.0),
+        image_provider=os.getenv("IMAGE_PROVIDER", "openai").strip().lower(),
+        image_model=os.getenv("IMAGE_MODEL", "dall-e").strip(),
+        image_base_url=os.getenv("IMAGE_BASE_URL") or None,
+        image_poll_interval_s=_env_float("IMAGE_POLL_INTERVAL_S", 5.0),
+        image_max_poll_seconds=_env_int("IMAGE_MAX_POLL_SECONDS", 300),
         tavily_api_key=os.getenv("TAVILY_API_KEY") or None,
         openai_api_key=os.getenv("OPENAI_API_KEY") or None,
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY") or None,

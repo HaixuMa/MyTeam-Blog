@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+import json
 import re
+import socket
+import time
+import urllib.request
 from datetime import datetime, timezone
+from typing import Any, TypeVar
+
+from langchain_core.language_models.chat_models import BaseChatModel
+from pydantic import BaseModel
 
 from schemas.state import GraphState
+
+TModel = TypeVar("TModel", bound=BaseModel)
 
 
 def sanitize_user_text(text: str) -> str:
@@ -44,4 +54,254 @@ def record_prompt_snapshot(
             "user_prompt": user_prompt[:12000],
         }
     )
+
+
+def invoke_structured_output(
+    *,
+    llm: BaseChatModel,
+    schema: type[TModel],
+    messages: list[Any],
+) -> TModel:
+    raw_cfg = getattr(llm, "_raw_openai_compatible", None)
+    if isinstance(raw_cfg, dict) and raw_cfg.get("base_url") and raw_cfg.get("api_key") and raw_cfg.get("model"):
+        content = _raw_openai_compatible_chat(
+            base_url=str(raw_cfg["base_url"]),
+            api_key=str(raw_cfg["api_key"]),
+            model=str(raw_cfg["model"]),
+            temperature=float(raw_cfg.get("temperature", 0.2)),
+            timeout_s=float(raw_cfg.get("timeout_s", 60.0)),
+            messages=messages,
+        )
+        return _parse_content_to_schema(schema=schema, content=content)
+
+    methods: list[str | None] = ["json_mode", "function_calling", None]
+    last_error: Exception | None = None
+    for m in methods:
+        try:
+            if m is None:
+                structured = llm.with_structured_output(schema)
+            else:
+                structured = llm.with_structured_output(schema, method=m)
+            return structured.invoke(messages)
+        except TypeError as e:
+            last_error = e
+            if "NoneType" in str(e) and "iterable" in str(e):
+                continue
+            raise
+        except Exception as e:
+            last_error = e
+            continue
+
+    try:
+        msg = llm.invoke(messages)
+        content = getattr(msg, "content", "")
+        if not isinstance(content, str):
+            content = str(content)
+        return _parse_content_to_schema(schema=schema, content=content)
+    except Exception as e:
+        raise RuntimeError(str(last_error) if last_error else str(e))
+
+
+def _raw_openai_compatible_chat(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    temperature: float,
+    timeout_s: float,
+    messages: list[Any],
+) -> str:
+    url = base_url.rstrip("/") + "/chat/completions"
+    oa_messages: list[dict[str, str]] = []
+    for m in messages:
+        if isinstance(m, dict) and "role" in m and "content" in m:
+            oa_messages.append({"role": str(m["role"]), "content": str(m["content"])})
+            continue
+        msg_type = getattr(m, "type", None)
+        content = getattr(m, "content", "")
+        if msg_type == "system":
+            oa_messages.append({"role": "system", "content": str(content)})
+        elif msg_type == "human":
+            oa_messages.append({"role": "user", "content": str(content)})
+        elif msg_type == "ai":
+            oa_messages.append({"role": "assistant", "content": str(content)})
+        else:
+            oa_messages.append({"role": "user", "content": str(content)})
+
+    body = {
+        "model": model,
+        "messages": oa_messages,
+        "temperature": temperature,
+        "stream": True,
+        "max_tokens": 2048,
+    }
+    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "text/event-stream")
+    req.add_header("Authorization", "Bearer " + api_key)
+
+    resp = urllib.request.urlopen(req, timeout=timeout_s)
+    try:
+        sock = resp.fp.raw._sock
+        sock.settimeout(2.0)
+    except Exception:
+        pass
+
+    text_parts: list[str] = []
+    started = time.time()
+    while time.time() - started < timeout_s:
+        try:
+            line = resp.readline()
+        except socket.timeout:
+            continue
+        if not line:
+            break
+        s = line.decode("utf-8", "replace").strip()
+        if not s or not s.startswith("data:"):
+            continue
+        payload = s[5:].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            obj = json.loads(payload)
+        except Exception:
+            continue
+        choices = obj.get("choices") or []
+        if not choices:
+            continue
+        ch0 = choices[0] or {}
+        delta = ch0.get("delta") or {}
+        c = delta.get("content")
+        if isinstance(c, str) and c:
+            text_parts.append(c)
+        else:
+            rc = delta.get("reasoning_content")
+            if isinstance(rc, str) and rc:
+                text_parts.append(rc)
+        if ch0.get("finish_reason"):
+            break
+    return "".join(text_parts).strip()
+
+
+def _extract_json(text: str) -> str:
+    t = text.strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-zA-Z0-9_+-]*\s*", "", t)
+        t = re.sub(r"\s*```$", "", t)
+        t = t.strip()
+    start = t.find("{")
+    end = t.rfind("}")
+    if start >= 0 and end > start:
+        return t[start : end + 1]
+    start = t.find("[")
+    end = t.rfind("]")
+    if start >= 0 and end > start:
+        return t[start : end + 1]
+    return t
+
+
+def _parse_content_to_schema(*, schema: type[TModel], content: str) -> TModel:
+    last: Exception | None = None
+
+    for cand in _iter_json_candidates(content):
+        try:
+            data = json.loads(cand)
+        except Exception as e:
+            last = e
+            continue
+
+        try:
+            return schema.model_validate(data)
+        except Exception as e:
+            last = e
+            if isinstance(data, list):
+                for item in data:
+                    if not isinstance(item, (dict, list)):
+                        continue
+                    try:
+                        return schema.model_validate(item)
+                    except Exception as e2:
+                        last = e2
+                        continue
+
+            if isinstance(data, dict):
+                for v in data.values():
+                    if isinstance(v, dict):
+                        try:
+                            return schema.model_validate(v)
+                        except Exception as e2:
+                            last = e2
+                            continue
+                    if isinstance(v, list):
+                        for item in v:
+                            if not isinstance(item, (dict, list)):
+                                continue
+                            try:
+                                return schema.model_validate(item)
+                            except Exception as e3:
+                                last = e3
+                                continue
+            continue
+
+    raise RuntimeError(str(last) if last else "structured_output_parse_failed")
+
+
+def _iter_json_candidates(text: str) -> list[str]:
+    t = text.strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-zA-Z0-9_+-]*\s*", "", t)
+        t = re.sub(r"\s*```$", "", t)
+        t = t.strip()
+
+    candidates: list[str] = []
+    candidates.append(t)
+
+    extracted = _extract_json(t)
+    if extracted != t:
+        candidates.append(extracted)
+
+    candidates.extend(_extract_braced_blocks(t, open_ch="{", close_ch="}"))
+    candidates.extend(_extract_braced_blocks(t, open_ch="[", close_ch="]"))
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in candidates:
+        c2 = c.strip()
+        if not c2 or c2 in seen:
+            continue
+        seen.add(c2)
+        out.append(c2)
+    return out
+
+
+def _extract_braced_blocks(text: str, *, open_ch: str, close_ch: str) -> list[str]:
+    blocks: list[str] = []
+    depth = 0
+    start: int | None = None
+    in_str = False
+    escape = False
+
+    for i, ch in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_str:
+            escape = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == open_ch:
+            if depth == 0:
+                start = i
+            depth += 1
+            continue
+        if ch == close_ch and depth > 0:
+            depth -= 1
+            if depth == 0 and start is not None:
+                blocks.append(text[start : i + 1])
+                start = None
+    return blocks
 

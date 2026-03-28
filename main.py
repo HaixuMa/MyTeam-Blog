@@ -97,6 +97,10 @@ def main() -> int:
         goal = _load_goal(args)
         state = new_initial_state(user_goal=goal)
 
+    user_goal = UserResearchGoal.model_validate(state["user_goal"])
+    user_goal.output_language = "zh"
+    state["user_goal"] = user_goal.model_dump(mode="json")
+
     if not isinstance(state.get("project_context"), dict):
         state["project_context"] = {}
     state["project_context"].update(
