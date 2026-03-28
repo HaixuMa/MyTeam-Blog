@@ -1,0 +1,10 @@
+langchain==0.2.13
+langchain-community==0.2.12
+langchain-openai==0.1.25
+langchain-anthropic==0.1.23
+langgraph==0.2.14
+pydantic==2.7.4
+python-dotenv==1.0.1
+requests==2.32.3
+beautifulsoup4==4.12.3
+lxml==5.2.2
