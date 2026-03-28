@@ -7,7 +7,9 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 from pydantic import BaseModel, Field
 
-from agents.prompting import sanitize_user_text
+from agents.context import system_context
+from agents.prompting import record_prompt_snapshot, sanitize_user_text
+from agents.prompts import planning_system_prompt, planning_user_prompt
 from harness.base import AgentHarness, ContractViolationError
 from schemas.planning import ResearchExecutionPlan, UserResearchGoal
 from schemas.state import GraphState
@@ -68,27 +70,26 @@ class PlanningAgentHarness(AgentHarness[UserResearchGoal, ResearchExecutionPlan]
         cleaned_goal = sanitize_user_text(input.research_goal)
         clarifications = input.clarifications
 
-        sys = SystemMessage(
-            content=(
-                "你是研究团队的项目管理办公室（PMO）。"
-                "你的输出必须严格符合给定的 Pydantic 契约模型。"
-                "如果研究目标模糊/范围过大/不可执行，必须输出 clarification_needed=true，"
-                "并提供 3-8 个可回答的澄清问题。"
-                "如果可以执行，必须生成可执行的研究执行计划书：5-8 个研究维度，每个维度包含清晰验收标准。"
-                "禁止输出无来源要求或模糊里程碑。"
-            )
-        )
+        sys_content = system_context(state=state, node=self.node) + "\n\n" + planning_system_prompt()
+        sys = SystemMessage(content=sys_content)
 
         structured = self._llm.with_structured_output(ResearchExecutionPlan)
 
         plan_id = f"plan_{uuid.uuid4().hex[:12]}"
-        prompt = (
-            f"研究目标：{cleaned_goal}\n"
-            f"用户要求：{input.user_requirements}\n"
-            f"截止期：{input.deadline}\n"
-            f"输出语言：{input.output_language}\n"
-            f"已有澄清答案（如有）：{clarifications}\n\n"
-            "请生成 ResearchExecutionPlan。plan_id 必须使用提供的 plan_id 字段。"
+        prompt = planning_user_prompt(
+            cleaned_goal=cleaned_goal,
+            user_requirements=input.user_requirements,
+            deadline=input.deadline,
+            output_language=input.output_language,
+            clarifications=clarifications,
+            plan_id=plan_id,
+        )
+        record_prompt_snapshot(
+            state=state,
+            node=self.node,
+            role=self.role,
+            system_prompt=sys_content,
+            user_prompt=prompt,
         )
         plan = structured.invoke([sys, {"role": "user", "content": prompt}])
         if plan.plan_id != plan_id:

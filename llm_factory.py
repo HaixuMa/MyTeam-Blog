@@ -29,6 +29,7 @@ def create_chat_model(cfg: AppConfig) -> tuple[BaseChatModel, ModelInfo]:
             model=cfg.model_name,
             temperature=cfg.model_temperature,
             timeout=cfg.request_timeout_s,
+            model_kwargs=cfg.model_extra_body or {},
         )
         return llm, ModelInfo(provider=provider, model_name=cfg.model_name)
 
@@ -56,10 +57,10 @@ def create_chat_model(cfg: AppConfig) -> tuple[BaseChatModel, ModelInfo]:
             temperature=cfg.model_temperature,
             timeout=cfg.request_timeout_s,
             base_url=cfg.model_base_url,
+            model_kwargs=cfg.model_extra_body or {},
         )
         return llm, ModelInfo(provider=provider, model_name=cfg.model_name)
 
     raise ConfigError(
         "Unsupported MODEL_PROVIDER. Use one of: openai, anthropic, openai_compatible"
     )
-

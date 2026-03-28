@@ -7,7 +7,10 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 from pydantic import BaseModel, Field
 
+from agents.context import system_context
+from agents.prompting import record_prompt_snapshot
 from harness.base import AgentHarness, ContractViolationError, RecoverableHarnessError
+from agents.prompts import imaging_system_prompt, imaging_user_prompt
 from schemas.imaging import ArticleWithImages, GeneratedImage
 from schemas.state import GraphState
 from schemas.writing import FigureRequest, TechnicalArticleDraft
@@ -56,26 +59,21 @@ class ImagingAgentHarness(AgentHarness[TechnicalArticleDraft, ArticleWithImages]
     def _invoke(self, *, input: TechnicalArticleDraft, state: GraphState) -> ArticleWithImages:
         trace_id = state["trace_id"]
 
-        sys = SystemMessage(
-            content=(
-                "你是技术文章配图设计师。你需要把 figure_request 转换为高质量专业文生图 prompt。"
-                "prompt 必须清晰描述图类型、元素、布局、风格，并避免侵权与敏感内容。"
-                "输出必须是结构化对象，仅包含 prompt 与 safety_notes。"
-            )
-        )
+        sys_content = system_context(state=state, node=self.node) + "\n\n" + imaging_system_prompt()
+        sys = SystemMessage(content=sys_content)
         structured = self._llm.with_structured_output(_PromptOut)
 
         md = input.markdown
         images: list[GeneratedImage] = []
 
         for fr in input.figure_requests:
-            prompt_in = (
-                f"figure_id: {fr.figure_id}\n"
-                f"figure_type: {fr.figure_type}\n"
-                f"purpose: {fr.purpose}\n"
-                f"must_include: {fr.must_include}\n"
-                f"style_guidelines: {fr.style_guidelines}\n"
-                f"seed: {fr.prompt_seed}\n"
+            prompt_in = imaging_user_prompt(figure_request=fr)
+            record_prompt_snapshot(
+                state=state,
+                node=self.node,
+                role=self.role,
+                system_prompt=sys_content,
+                user_prompt=prompt_in,
             )
             p = structured.invoke([sys, {"role": "user", "content": prompt_in}])
 
@@ -168,4 +166,3 @@ def _embed_figure(
     alt = f"{figure_request.figure_type}:{figure_request.figure_id}"
     replacement = f"\n\n![{alt}]({image_path})\n\n"
     return markdown.replace(anchor_token, replacement)
-

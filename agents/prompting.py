@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
+
+from schemas.state import GraphState
 
 
 def sanitize_user_text(text: str) -> str:
@@ -18,4 +21,27 @@ def sanitize_user_text(text: str) -> str:
 
 def enforce_markdown_no_html(md: str) -> str:
     return re.sub(r"<script[\s\S]*?</script>", "", md, flags=re.IGNORECASE)
+
+
+def record_prompt_snapshot(
+    *,
+    state: GraphState,
+    node: str,
+    role: str,
+    system_prompt: str,
+    user_prompt: str,
+) -> None:
+    history = state.get("prompt_history")
+    if not isinstance(history, list):
+        history = []
+        state["prompt_history"] = history
+    history.append(
+        {
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "node": node,
+            "role": role,
+            "system_prompt": system_prompt[:12000],
+            "user_prompt": user_prompt[:12000],
+        }
+    )
 

@@ -8,7 +8,10 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 from pydantic import BaseModel, Field
 
+from agents.context import system_context
+from agents.prompting import record_prompt_snapshot
 from harness.base import AgentHarness, ContractViolationError
+from agents.prompts import auditing_system_prompt, auditing_user_prompt
 from schemas.auditing import AuditReport, FinalPublishedArticle
 from schemas.research import MultiDimensionResearchResult
 from schemas.state import GraphState
@@ -69,27 +72,21 @@ class AuditAgentHarness(AgentHarness[AuditInput, AuditOutput]):
             raise ContractViolationError("unresolved_figure_anchors_in_final")
 
     def _invoke(self, *, input: AuditInput, state: GraphState) -> AuditOutput:
-        sys = SystemMessage(
-            content=(
-                "你是总编与质控负责人。你必须做三类审核：事实性、逻辑性、规范性。"
-                "事实性必须对照 research 的 findings/citations；"
-                "逻辑性检查论证链条与结论一致性；"
-                "规范性检查错别字、术语、格式、参考文献规范与图片引用。"
-                "如果发现严重问题，audit_report.passed=false，并在 issues 中标注 target_stage。"
-                "同时输出 final_article：对能修复的格式与轻微问题直接修复，结构统一排版。"
-                "输出必须为 AuditOutput 结构化对象。"
-            )
-        )
+        sys_content = system_context(state=state, node=self.node) + "\n\n" + auditing_system_prompt()
+        sys = SystemMessage(content=sys_content)
         structured = self._llm.with_structured_output(AuditOutput)
 
-        prompt = (
-            f"research（调研）：{input.research.model_dump(mode='json')}\n\n"
-            f"article（待审稿）：{input.article.model_dump(mode='json')}\n\n"
-            f"rounds_used：{input.rounds_used}\n\n"
-            "请输出 AuditOutput。要求：\n"
-            "- final_article.markdown 必须是规范 Markdown，统一标题层级与图片引用；\n"
-            "- 参考文献格式统一为编号列表 [1] ...，并与正文引用一致（如果无法严格对齐，至少保证引用来源存在）；\n"
-            "- audit_report.issues 需要包含可操作的修改建议。"
+        prompt = auditing_user_prompt(
+            research_json=input.research.model_dump(mode="json"),
+            article_json=input.article.model_dump(mode="json"),
+            rounds_used=input.rounds_used,
+        )
+        record_prompt_snapshot(
+            state=state,
+            node=self.node,
+            role=self.role,
+            system_prompt=sys_content,
+            user_prompt=prompt,
         )
         out = structured.invoke([sys, {"role": "user", "content": prompt}])
 
@@ -108,4 +105,3 @@ def _normalize_markdown(md: str) -> str:
     md = re.sub(r"\n{3,}", "\n\n", md)
     md = md.strip() + "\n"
     return md
-

@@ -30,6 +30,11 @@ class GraphState(TypedDict):
     user_goal: dict
     plan: NotRequired[dict]
 
+    project_context: NotRequired[dict]
+    prompt_history: NotRequired[list[dict]]
+    memory: NotRequired[dict]
+    stage_history: NotRequired[list[dict]]
+
     research_partials: NotRequired[list[dict]]
     research_result: NotRequired[dict]
 
@@ -49,4 +54,3 @@ class GraphState(TypedDict):
 
 def now_iso() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-

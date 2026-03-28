@@ -7,6 +7,9 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 from pydantic import BaseModel, Field
 
+from agents.context import system_context
+from agents.prompting import record_prompt_snapshot
+from agents.prompts import analysis_system_prompt, analysis_user_prompt
 from harness.base import AgentHarness, ContractViolationError
 from schemas.analysis import DeepResearchAnalysisReport
 from schemas.planning import ResearchExecutionPlan
@@ -59,22 +62,21 @@ class DeepResearchAgentHarness(AgentHarness[AnalysisInput, DeepResearchAnalysisR
                 raise ContractViolationError("analysis_references_unknown_finding_id")
 
     def _invoke(self, *, input: AnalysisInput, state: GraphState) -> DeepResearchAnalysisReport:
-        sys = SystemMessage(
-            content=(
-                "你是研究分析师。你必须严格基于提供的调研 findings 进行交叉分析。"
-                "每个维度分析必须引用 supported_by_finding_ids，禁止无根据的主观观点。"
-                "输出必须是 DeepResearchAnalysisReport 的结构化对象。"
-            )
-        )
+        sys_content = system_context(state=state, node=self.node) + "\n\n" + analysis_system_prompt()
+        sys = SystemMessage(content=sys_content)
         structured = self._llm.with_structured_output(DeepResearchAnalysisReport)
 
-        prompt = (
-            f"研究计划：{input.plan.model_dump(mode='json')}\n\n"
-            f"调研结果（包含 findings 与 citations）：{input.research.model_dump(mode='json')}\n\n"
-            f"请输出 {DeepResearchAnalysisReport.__name__}。"
-            "要求：dimension_analysis 的维度必须与计划 dimensions 一一对应；"
-            "dimension_analysis.supported_by_finding_ids 必须引用提供的 finding_id。"
-            "citations 必须来自调研结果中的 citations（不要新增未提供来源）。"
+        prompt = analysis_user_prompt(
+            plan_json=input.plan.model_dump(mode="json"),
+            research_json=input.research.model_dump(mode="json"),
+            output_schema=DeepResearchAnalysisReport.__name__,
+        )
+        record_prompt_snapshot(
+            state=state,
+            node=self.node,
+            role=self.role,
+            system_prompt=sys_content,
+            user_prompt=prompt,
         )
         out = structured.invoke([sys, {"role": "user", "content": prompt}])
         out.plan_id = input.plan.plan_id

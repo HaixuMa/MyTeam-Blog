@@ -9,6 +9,7 @@ from typing import Literal
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.graph import END, StateGraph
+from datetime import datetime, timezone
 
 from agents.analysis import AnalysisInput, DeepResearchAgentHarness
 from agents.auditing import AuditAgentHarness, AuditInput, AuditOutput
@@ -28,12 +29,41 @@ from schemas.state import GraphState, now_iso
 from schemas.writing import TechnicalArticleDraft
 from tools.image_tools import ImageToolbox
 from tools.research_tools import ResearchToolbox
+from memory_store import update_quality_memory
 
 
 @dataclass(frozen=True)
 class OrchestratorResult:
     state: GraphState
     status: Literal["completed", "halted", "failed"]
+
+
+def _route_next_or_end(state: GraphState) -> str:
+    if state.get("fatal_error") or state.get("stage") == "halted":
+        return "end"
+    return "next"
+
+
+def _detect_repeating_suffix(*, seq: list[str], max_period: int = 4, min_repeats: int = 2) -> dict | None:
+    if min_repeats < 2:
+        min_repeats = 2
+    n = len(seq)
+    for period in range(1, max_period + 1):
+        window = period * min_repeats
+        if n < window:
+            continue
+        tail = seq[-window:]
+        pat = tail[:period]
+        if len(set(pat)) == 1:
+            continue
+        ok = True
+        for k in range(1, min_repeats):
+            if tail[k * period : (k + 1) * period] != pat:
+                ok = False
+                break
+        if ok:
+            return {"period": period, "repeats": min_repeats, "pattern": pat, "window": tail}
+    return None
 
 
 def new_initial_state(*, user_goal: UserResearchGoal, trace_id: str | None = None) -> GraphState:
@@ -108,13 +138,33 @@ class HarnessOrchestrator:
             },
         )
 
-        graph.add_edge("research_academic", "research_tech")
-        graph.add_edge("research_tech", "research_industry")
-        graph.add_edge("research_industry", "research_competitor")
-        graph.add_edge("research_competitor", "research_aggregate")
-        graph.add_edge("research_aggregate", "analysis")
-        graph.add_edge("analysis", "writing")
-        graph.add_edge("writing", "imaging")
+        graph.add_conditional_edges(
+            "research_academic",
+            _route_next_or_end,
+            {"next": "research_tech", "end": END},
+        )
+        graph.add_conditional_edges(
+            "research_tech",
+            _route_next_or_end,
+            {"next": "research_industry", "end": END},
+        )
+        graph.add_conditional_edges(
+            "research_industry",
+            _route_next_or_end,
+            {"next": "research_competitor", "end": END},
+        )
+        graph.add_conditional_edges(
+            "research_competitor",
+            _route_next_or_end,
+            {"next": "research_aggregate", "end": END},
+        )
+        graph.add_conditional_edges(
+            "research_aggregate",
+            _route_next_or_end,
+            {"next": "analysis", "end": END},
+        )
+        graph.add_conditional_edges("analysis", _route_next_or_end, {"next": "writing", "end": END})
+        graph.add_conditional_edges("writing", _route_next_or_end, {"next": "imaging", "end": END})
 
         graph.add_conditional_edges(
             "auditing",
@@ -127,7 +177,7 @@ class HarnessOrchestrator:
                 "halted": END,
             },
         )
-        graph.add_edge("imaging", "auditing")
+        graph.add_conditional_edges("imaging", _route_next_or_end, {"next": "auditing", "end": END})
         graph.add_edge("publish", END)
 
         sqlite_url = f"sqlite:///{self._cfg.checkpoint_sqlite_path.as_posix()}"
@@ -142,8 +192,105 @@ class HarnessOrchestrator:
             checkpointer = SqliteSaver(conn)
         return graph.compile(checkpointer=checkpointer)
 
+    def _bump_loop_guard(self, *, state: GraphState, node: str) -> bool:
+        memory = state.get("memory")
+        if not isinstance(memory, dict):
+            memory = {}
+            state["memory"] = memory
+
+        guard = memory.get("loop_guard")
+        if not isinstance(guard, dict):
+            guard = {}
+            memory["loop_guard"] = guard
+
+        seq = guard.get("seq")
+        if not isinstance(seq, list):
+            seq = []
+            guard["seq"] = seq
+        seq.append(node)
+        if len(seq) > 80:
+            del seq[: len(seq) - 80]
+
+        history = state.get("stage_history")
+        if not isinstance(history, list):
+            history = []
+            state["stage_history"] = history
+        history.append(
+            {
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                "from_stage": state.get("stage", ""),
+                "to_node": node,
+            }
+        )
+        if len(history) > 400:
+            del history[: len(history) - 400]
+
+        total_steps = int(guard.get("total_steps", 0)) + 1
+        guard["total_steps"] = total_steps
+
+        node_visits = guard.get("node_visits")
+        if not isinstance(node_visits, dict):
+            node_visits = {}
+            guard["node_visits"] = node_visits
+        node_visits[node] = int(node_visits.get(node, 0)) + 1
+
+        repeat = _detect_repeating_suffix(seq=seq, max_period=4, min_repeats=2)
+        if repeat is not None:
+            state["stage"] = "halted"
+            state["halted_reason"] = "loop_guard_repeating_pattern"
+            memory["loop_guard_exceeded"] = {
+                "node": node,
+                "pattern": repeat.get("pattern"),
+                "period": repeat.get("period"),
+                "repeats": repeat.get("repeats"),
+                "window": repeat.get("window"),
+                "total_steps": total_steps,
+            }
+            state["execution_events"].append(
+                {
+                    "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                    "trace_id": state["trace_id"],
+                    "node": node,
+                    "role": "orchestrator",
+                    "status": "halted",
+                    "duration_ms": None,
+                    "attempt": 1,
+                    "message": "loop_guard_repeating_pattern",
+                    "input_summary": None,
+                    "output_summary": None,
+                    "error_type": None,
+                    "error_message": None,
+                }
+            )
+            return False
+
+        if total_steps > self._cfg.max_total_node_steps:
+            state["stage"] = "halted"
+            state["halted_reason"] = "loop_guard_total_steps_exceeded"
+            memory["loop_guard_exceeded"] = {
+                "node": node,
+                "total_steps": total_steps,
+                "max_total_node_steps": self._cfg.max_total_node_steps,
+            }
+            return False
+
+        if int(node_visits[node]) > self._cfg.max_node_visits_per_node:
+            state["stage"] = "halted"
+            state["halted_reason"] = "loop_guard_node_visits_exceeded"
+            memory["loop_guard_exceeded"] = {
+                "node": node,
+                "node_visits": int(node_visits[node]),
+                "max_node_visits_per_node": self._cfg.max_node_visits_per_node,
+                "total_steps": total_steps,
+            }
+            return False
+
+        return True
+
     def _planning_node(self, state: GraphState) -> GraphState:
         try:
+            if not self._bump_loop_guard(state=state, node="planning"):
+                return state
             state["stage"] = "planning"
             user_goal = UserResearchGoal.model_validate(state["user_goal"])
             harness = PlanningAgentHarness(
@@ -162,6 +309,8 @@ class HarnessOrchestrator:
             return _fatal(state, e)
 
     def _route_after_planning(self, state: GraphState) -> str:
+        if state.get("fatal_error") or state.get("stage") == "halted":
+            return "halted"
         plan = ResearchExecutionPlan.model_validate(state.get("plan") or {})
         if plan.clarification_needed:
             return "halted"
@@ -169,24 +318,32 @@ class HarnessOrchestrator:
 
     def _research_academic_node(self, state: GraphState) -> GraphState:
         try:
+            if not self._bump_loop_guard(state=state, node="research_academic"):
+                return state
             return self._run_research_subagent(state=state, agent_type="academic")
         except Exception as e:
             return _fatal(state, e)
 
     def _research_tech_node(self, state: GraphState) -> GraphState:
         try:
+            if not self._bump_loop_guard(state=state, node="research_tech"):
+                return state
             return self._run_research_subagent(state=state, agent_type="tech")
         except Exception as e:
             return _fatal(state, e)
 
     def _research_industry_node(self, state: GraphState) -> GraphState:
         try:
+            if not self._bump_loop_guard(state=state, node="research_industry"):
+                return state
             return self._run_research_subagent(state=state, agent_type="industry")
         except Exception as e:
             return _fatal(state, e)
 
     def _research_competitor_node(self, state: GraphState) -> GraphState:
         try:
+            if not self._bump_loop_guard(state=state, node="research_competitor"):
+                return state
             return self._run_research_subagent(state=state, agent_type="competitor")
         except Exception as e:
             return _fatal(state, e)
@@ -197,6 +354,8 @@ class HarnessOrchestrator:
         state: GraphState,
         agent_type: Literal["academic", "tech", "industry", "competitor"],
     ) -> GraphState:
+        if state.get("fatal_error") or state.get("stage") == "halted":
+            return state
         state["stage"] = f"research_{agent_type}"  # type: ignore[assignment]
         plan = ResearchExecutionPlan.model_validate(state["plan"])
         user_goal = UserResearchGoal.model_validate(state["user_goal"])
@@ -223,6 +382,8 @@ class HarnessOrchestrator:
 
     def _research_aggregate_node(self, state: GraphState) -> GraphState:
         try:
+            if not self._bump_loop_guard(state=state, node="research_aggregate"):
+                return state
             state["stage"] = "research_aggregate"
             plan = ResearchExecutionPlan.model_validate(state["plan"])
             partial_dicts = state.get("research_partials") or []
@@ -243,6 +404,8 @@ class HarnessOrchestrator:
 
     def _analysis_node(self, state: GraphState) -> GraphState:
         try:
+            if not self._bump_loop_guard(state=state, node="analysis"):
+                return state
             state["stage"] = "analysis"
             plan = ResearchExecutionPlan.model_validate(state["plan"])
             research = MultiDimensionResearchResult.model_validate(state["research_result"])
@@ -260,6 +423,8 @@ class HarnessOrchestrator:
 
     def _writing_node(self, state: GraphState) -> GraphState:
         try:
+            if not self._bump_loop_guard(state=state, node="writing"):
+                return state
             state["stage"] = "writing"
             plan = ResearchExecutionPlan.model_validate(state["plan"])
             analysis = DeepResearchAnalysisReport.model_validate(state["analysis_report"])
@@ -277,6 +442,8 @@ class HarnessOrchestrator:
 
     def _imaging_node(self, state: GraphState) -> GraphState:
         try:
+            if not self._bump_loop_guard(state=state, node="imaging"):
+                return state
             state["stage"] = "imaging"
             user_goal = UserResearchGoal.model_validate(state["user_goal"])
             draft = state.get("article_draft") or {}
@@ -286,7 +453,8 @@ class HarnessOrchestrator:
                 logger=self._logger,
                 allowed_tools=user_goal.allowed_tools,
                 rate_limit_per_minute=self._cfg.tool_rate_limit_per_minute,
-                openai_api_key_present=bool(self._cfg.openai_api_key),
+                openai_api_key_present=bool(self._cfg.openai_api_key)
+                and self._cfg.model_provider == "openai",
                 data_dir=self._cfg.data_dir,
                 request_timeout_s=self._cfg.request_timeout_s,
             )
@@ -306,6 +474,8 @@ class HarnessOrchestrator:
 
     def _auditing_node(self, state: GraphState) -> GraphState:
         try:
+            if not self._bump_loop_guard(state=state, node="auditing"):
+                return state
             state["stage"] = "auditing"
             research = MultiDimensionResearchResult.model_validate(state["research_result"])
             article = ArticleWithImages.model_validate(state["article_with_images"])
@@ -323,11 +493,26 @@ class HarnessOrchestrator:
             )
             state["final_article"] = out.final_article.model_dump(mode="json")
             state["audit_report"] = out.audit_report.model_dump(mode="json")
+            memory = state.get("memory")
+            if not isinstance(memory, dict):
+                memory = {}
+                state["memory"] = memory
+            memory["last_audit_summary"] = out.audit_report.summary[:2000]
+            memory["last_audit_issue_counts"] = {
+                "blocker_or_high": sum(1 for i in out.audit_report.issues if i.severity in {"blocker", "high"}),
+                "total": len(out.audit_report.issues),
+            }
+            update_quality_memory(
+                data_dir=self._cfg.data_dir,
+                issues=[i.model_dump(mode="json") for i in out.audit_report.issues],
+            )
             return state
         except Exception as e:
             return _fatal(state, e)
 
     def _route_after_audit(self, state: GraphState) -> str:
+        if state.get("fatal_error") or state.get("stage") == "halted":
+            return "halted"
         rounds = int(state.get("audit_rounds_used", 0))
         report = AuditReport.model_validate(state.get("audit_report") or {})
 
@@ -350,6 +535,8 @@ class HarnessOrchestrator:
 
     def _publish_node(self, state: GraphState) -> GraphState:
         try:
+            if not self._bump_loop_guard(state=state, node="publish"):
+                return state
             state["stage"] = "publish"
             final = FinalPublishedArticle.model_validate(state["final_article"])
             audit = AuditReport.model_validate(state["audit_report"])

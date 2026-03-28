@@ -97,6 +97,25 @@ def main() -> int:
         goal = _load_goal(args)
         state = new_initial_state(user_goal=goal)
 
+    if not isinstance(state.get("project_context"), dict):
+        state["project_context"] = {}
+    state["project_context"].update(
+        {
+            "project_root": str(project_root),
+            "data_dir": str(cfg.data_dir),
+            "outputs_root": str((cfg.data_dir / "outputs").resolve()),
+            "checkpoint_sqlite_path": str(cfg.checkpoint_sqlite_path),
+            "model_provider": cfg.model_provider,
+            "model_name": cfg.model_name,
+        }
+    )
+    if not isinstance(state.get("prompt_history"), list):
+        state["prompt_history"] = []
+    if not isinstance(state.get("memory"), dict):
+        state["memory"] = {}
+    if not isinstance(state.get("stage_history"), list):
+        state["stage_history"] = []
+
     result: OrchestratorResult
     if args.mode == "full":
         result = orchestrator.run_full(state=state)

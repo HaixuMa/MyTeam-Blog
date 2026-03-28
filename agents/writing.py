@@ -8,7 +8,10 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 from pydantic import BaseModel
 
+from agents.context import system_context
+from agents.prompting import record_prompt_snapshot
 from agents.prompting import enforce_markdown_no_html
+from agents.prompts import writing_system_prompt, writing_user_prompt
 from harness.base import AgentHarness, ContractViolationError
 from schemas.analysis import DeepResearchAnalysisReport
 from schemas.planning import ResearchExecutionPlan
@@ -72,26 +75,20 @@ class TechnicalWritingAgentHarness(AgentHarness[WritingInput, TechnicalArticleDr
             raise ContractViolationError("unsafe_html_detected")
 
     def _invoke(self, *, input: WritingInput, state: GraphState) -> TechnicalArticleDraft:
-        sys = SystemMessage(
-            content=(
-                "你是技术文章作者。必须基于分析报告撰写专业技术文章，结构固定："
-                "摘要、研究背景、核心技术分析、产业落地、趋势预判、参考文献、附录。"
-                "每个章节必须对应分析报告的核心内容，禁止出现无来源观点。"
-                "你需要在需要配图的段落插入锚点标记，格式为：[[FIG:<figure_id>:<anchor>]]。"
-                "同时在 figure_requests 中列出图需求，paragraph_anchor 字段必须等于 Markdown 里的 <anchor>。"
-                "输出必须是 TechnicalArticleDraft 结构化对象。"
-            )
-        )
+        sys_content = system_context(state=state, node=self.node) + "\n\n" + writing_system_prompt()
+        sys = SystemMessage(content=sys_content)
         structured = self._llm.with_structured_output(TechnicalArticleDraft)
 
-        prompt = (
-            f"研究计划：{input.plan.model_dump(mode='json')}\n\n"
-            f"分析报告：{input.analysis.model_dump(mode='json')}\n\n"
-            "请输出 TechnicalArticleDraft。要求：\n"
-            "- markdown 使用中文，标题层级规范；\n"
-            "- 引用必须来自 analysis.citations（引用信息放入 references）；\n"
-            "- 文章中每个需要配图的段落插入 [[FIG:...]] 锚点；\n"
-            "- 参考文献章节必须列出 references（至少 8 条）。"
+        prompt = writing_user_prompt(
+            plan_json=input.plan.model_dump(mode="json"),
+            analysis_json=input.analysis.model_dump(mode="json"),
+        )
+        record_prompt_snapshot(
+            state=state,
+            node=self.node,
+            role=self.role,
+            system_prompt=sys_content,
+            user_prompt=prompt,
         )
         out = structured.invoke([sys, {"role": "user", "content": prompt}])
         out.plan_id = input.plan.plan_id

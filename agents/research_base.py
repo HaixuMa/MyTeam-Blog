@@ -9,7 +9,10 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 from pydantic import BaseModel, Field
 
+from agents.context import system_context
 from agents.prompting import sanitize_user_text
+from agents.prompts import research_system_prompt, research_user_prompt
+from agents.prompting import record_prompt_snapshot
 from harness.base import AgentHarness, ContractViolationError
 from schemas.common import Citation, ResearchFinding
 from schemas.planning import ResearchExecutionPlan
@@ -81,14 +84,8 @@ class ResearchSubAgentHarness(AgentHarness[ResearchExecutionPlan, ResearchPartia
         user_goal = state["user_goal"]
         max_sources = int(user_goal.get("max_sources_per_dimension", 8))
 
-        sys = SystemMessage(
-            content=(
-                "你是深度研究团队的信息采集子 Agent。"
-                "你必须只基于提供的 sources（包含 title/url/excerpt）生成结构化 findings。"
-                "每条 finding 必须至少引用 1 条 citation，citation.url 必须来自 sources.url。"
-                "禁止编造来源。若 sources 不足以支撑结论，必须降低 confidence 或提出 open 问题。"
-            )
-        )
+        sys_content = system_context(state=state, node=self.node) + "\n\n" + research_system_prompt()
+        sys = SystemMessage(content=sys_content)
         structured = self._llm.with_structured_output(_FindingsOutput)
 
         results: list[DimensionResearchResult] = []
@@ -97,13 +94,20 @@ class ResearchSubAgentHarness(AgentHarness[ResearchExecutionPlan, ResearchPartia
             query = self._build_query(input=input, dimension_name=dim.name, key_questions=dim.key_questions)
             sources = self._collect_sources(query=query, max_sources=max_sources)
 
-            prompt = (
-                f"研究主题：{sanitize_user_text(input.thesis)}\n"
-                f"当前维度：{dim.name} ({dim.dimension_id})\n"
-                f"关键问题：{dim.key_questions}\n"
-                f"验收标准：{dim.acceptance_criteria}\n\n"
-                f"可用 sources（只能引用这些）：{[c.model_dump(mode='json') for c in sources]}\n\n"
-                "请输出 findings（每条包含 claim/evidence/citations/confidence/tags）。"
+            prompt = research_user_prompt(
+                thesis=sanitize_user_text(input.thesis),
+                dim_name=dim.name,
+                dim_id=dim.dimension_id,
+                key_questions=dim.key_questions,
+                acceptance_criteria=dim.acceptance_criteria,
+                sources_json=[c.model_dump(mode="json") for c in sources],
+            )
+            record_prompt_snapshot(
+                state=state,
+                node=self.node,
+                role=self.role,
+                system_prompt=sys_content,
+                user_prompt=prompt,
             )
             out = structured.invoke([sys, {"role": "user", "content": prompt}])
 
