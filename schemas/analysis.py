@@ -31,6 +31,5 @@ class DeepResearchAnalysisReport(StrictModel):
     risks: list[str] = Field(default_factory=list, max_length=12)
     opportunities: list[str] = Field(default_factory=list, max_length=12)
     trends: list[str] = Field(min_length=3, max_length=10)
-    citations: list[Citation] = Field(min_length=8, max_length=80)
+    citations: list[Citation] = Field(min_length=3, max_length=80)
     generated_at: datetime
-

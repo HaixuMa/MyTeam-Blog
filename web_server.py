@@ -303,7 +303,11 @@ class App:
                     if isinstance(report, dict) and report.get("passed") is True:
                         self.registry.update(run_id=run_id, status="completed")
                         return
-                self.registry.update(run_id=run_id, status="completed")
+                self.registry.update(
+                    run_id=run_id,
+                    status="failed",
+                    error=str(state.get("fatal_error") or "incomplete_run_no_final_article"),
+                )
                 return
             except Exception as e:
                 self.registry.update(run_id=run_id, status="failed", error=f"{type(e).__name__}: {e}")
@@ -398,14 +402,34 @@ class Handler(BaseHTTPRequestHandler):
             def _try_import(name: str) -> dict[str, object]:
                 try:
                     mod = __import__(name)
-                    return {"ok": True, "file": getattr(mod, "__file__", None), "version": getattr(mod, "__version__", None)}
+                    f = getattr(mod, "__file__", None)
+                    out: dict[str, object] = {"ok": True, "file": f, "version": getattr(mod, "__version__", None)}
+                    if isinstance(f, str):
+                        try:
+                            p = Path(f)
+                            st = p.stat()
+                            out["file_mtime"] = st.st_mtime
+                            out["file_size"] = st.st_size
+                        except Exception:
+                            pass
+                    return out
                 except Exception as e:
                     return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
             def _try_import_deep(name: str) -> dict[str, object]:
                 try:
                     mod = __import__(name, fromlist=["__name__"])
-                    return {"ok": True, "file": getattr(mod, "__file__", None), "version": getattr(mod, "__version__", None)}
+                    f = getattr(mod, "__file__", None)
+                    out: dict[str, object] = {"ok": True, "file": f, "version": getattr(mod, "__version__", None)}
+                    if isinstance(f, str):
+                        try:
+                            p = Path(f)
+                            st = p.stat()
+                            out["file_mtime"] = st.st_mtime
+                            out["file_size"] = st.st_size
+                        except Exception:
+                            pass
+                    return out
                 except Exception as e:
                     return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
@@ -430,6 +454,11 @@ class Handler(BaseHTTPRequestHandler):
                     "deps": deps,
                     "modules": {
                         "orchestrator": _try_import("orchestrator"),
+                        "agents.planning": _try_import_deep("agents.planning"),
+                        "agents.research_base": _try_import_deep("agents.research_base"),
+                        "agents.analysis": _try_import_deep("agents.analysis"),
+                        "agents.writing": _try_import_deep("agents.writing"),
+                        "agents.auditing": _try_import_deep("agents.auditing"),
                     },
                     "imports": {
                         "pydantic": _try_import("pydantic"),
@@ -493,6 +522,7 @@ class Handler(BaseHTTPRequestHandler):
                             "stage_history_tail": (state.get("stage_history") or [])[-50:],
                             "scheduler": state.get("scheduler"),
                             "scheduler_events_tail": sched_tail,
+                            "prompt_history_tail": (state.get("prompt_history") or [])[-20:],
                         },
                     )
                     return

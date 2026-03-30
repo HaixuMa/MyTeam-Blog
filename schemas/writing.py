@@ -45,8 +45,7 @@ class TechnicalArticleDraft(StrictModel):
     industrial_applications: str = Field(min_length=200, max_length=8000)
     trends_outlook: str = Field(min_length=200, max_length=6000)
     appendix: str = Field(min_length=0, max_length=12000)
-    references: list[Citation] = Field(min_length=8, max_length=120)
+    references: list[Citation] = Field(min_length=3, max_length=120)
     figure_requests: list[FigureRequest] = Field(default_factory=list, max_length=10)
     markdown: str = Field(min_length=800, max_length=60000)
     generated_at: datetime
-

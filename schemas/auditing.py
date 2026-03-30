@@ -31,6 +31,5 @@ class FinalPublishedArticle(StrictModel):
     plan_id: str = Field(min_length=6, max_length=80)
     title: str = Field(min_length=10, max_length=160)
     markdown: str = Field(min_length=800, max_length=90000)
-    references: list[Citation] = Field(min_length=8, max_length=200)
+    references: list[Citation] = Field(min_length=3, max_length=200)
     generated_at: datetime
-

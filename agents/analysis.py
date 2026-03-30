@@ -11,7 +11,7 @@ from agents.context import system_context
 from agents.prompting import invoke_structured_output, record_prompt_snapshot
 from agents.prompts import analysis_system_prompt, analysis_user_prompt
 from harness.base import AgentHarness, ContractViolationError
-from schemas.analysis import DeepResearchAnalysisReport
+from schemas.analysis import DeepResearchAnalysisReport, DimensionAnalysis, ArgumentStep
 from schemas.planning import ResearchExecutionPlan
 from schemas.research import MultiDimensionResearchResult
 from schemas.state import GraphState
@@ -20,127 +20,6 @@ from schemas.state import GraphState
 class AnalysisInput(BaseModel):
     plan: ResearchExecutionPlan
     research: MultiDimensionResearchResult
-
-
-def _build_fallback_analysis(*, input: AnalysisInput) -> DeepResearchAnalysisReport:
-    now = datetime.now(tz=timezone.utc)
-    plan = input.plan
-    research = input.research
-
-    all_findings = [f for dr in research.dimension_results for f in dr.findings]
-    all_finding_ids = [f.finding_id for f in all_findings]
-
-    dim_to_finding_ids: dict[str, list[str]] = {}
-    for dr in research.dimension_results:
-        dim_to_finding_ids.setdefault(dr.dimension_id, [])
-        for f in dr.findings:
-            dim_to_finding_ids[dr.dimension_id].append(f.finding_id)
-
-    def _at_least_three(ids: list[str]) -> list[str]:
-        if not ids and all_finding_ids:
-            ids = [all_finding_ids[0]]
-        if not ids:
-            ids = ["fallback_missing_findings_1"]
-        while len(ids) < 3:
-            ids.append(ids[min(len(ids) - 1, 0)])
-        return ids[:3]
-
-    dimension_analysis = []
-    for d in plan.dimensions:
-        ids = _at_least_three(dim_to_finding_ids.get(d.dimension_id, []))
-        dimension_analysis.append(
-            {
-                "dimension_id": d.dimension_id,
-                "summary": f"围绕“{d.name}”汇总调研发现，形成可落地的接口、状态机与交互约束，用于支撑调度面板的可观测性与可控性。",
-                "key_points": [
-                    "明确该维度的最小可行输出与验收标准",
-                    "把关键问题映射为可观测的状态字段与事件类型",
-                    "为取消/重试/失败提供一致的状态转移与幂等语义",
-                ],
-                "supported_by_finding_ids": ids,
-                "open_questions": [
-                    "需要哪些指标来验证端到端体验与稳定性？",
-                    "哪些异常需要强制终止，哪些可以自动降级？",
-                ],
-            }
-        )
-
-    citations_pool = []
-    for dr in research.dimension_results:
-        citations_pool.extend(dr.sources)
-    citations: list[dict] = []
-    seen = set()
-    for c in citations_pool:
-        if c.url in seen:
-            continue
-        seen.add(c.url)
-        citations.append(c.model_dump(mode="json"))
-        if len(citations) >= 8:
-            break
-    while len(citations) < 8:
-        citations.append(
-            {
-                "source_type": "other",
-                "title": "Internal placeholder source",
-                "url": f"internal://analysis/fallback/{len(citations)+1}",
-                "published_date": None,
-                "authors": [],
-                "organization": "internal",
-                "accessed_at": now,
-                "excerpt": "No external sources available in current environment.",
-                "reliability_score": 0.1,
-            }
-        )
-
-    argument_map = []
-    base_ids = all_finding_ids or [x["supported_by_finding_ids"][0] for x in dimension_analysis]
-    while len(argument_map) < 8:
-        idx = len(argument_map) + 1
-        fid_slice = base_ids[(idx - 1) : (idx - 1) + 3]
-        while len(fid_slice) < 3:
-            fid_slice.append(fid_slice[-1] if fid_slice else base_ids[0])
-        argument_map.append(
-            {
-                "step_id": f"step_{idx:02d}",
-                "statement": "将调度执行过程抽象为事件流与状态机，并把每个节点的输入/输出/错误统一落在可追溯的事件模型中，才能支撑可视化与重试/取消控制。",
-                "supported_by_finding_ids": fid_slice[:3],
-            }
-        )
-
-    report_dict = {
-        "plan_id": plan.plan_id,
-        "thesis": plan.thesis,
-        "core_insights": [
-            "面板的核心不是展示 UI，而是统一“事件—状态—控制命令”的契约。",
-            "可取消/可重试必须建立在幂等语义与状态转移规则之上。",
-            "错误展示应与 prompt 快照、执行事件与异常栈形成闭环定位路径。",
-            "轮询/推送/混合的选择取决于事件量、延迟目标与资源上限。",
-            "观测与审计要求事件流成为单一事实来源（SSOT）。",
-        ],
-        "dimension_analysis": dimension_analysis,
-        "argument_map": argument_map,
-        "conclusions": [
-            "先定义状态机与事件模型，再实现 UI 与 API。",
-            "以事件流驱动渲染与审计，降低前后端不一致风险。",
-            "将取消/重试设计为命令事件并落实幂等策略。",
-        ],
-        "risks": [
-            "结构化输出不稳定导致契约校验失败",
-            "事件量增长引发前端渲染与存储压力",
-        ],
-        "opportunities": [
-            "事件与 prompt 快照可复用为质量与合规审计能力",
-            "调度面板可扩展为统一运行时控制台",
-        ],
-        "trends": [
-            "以事件驱动的可观测性成为 Agent 系统的基础设施",
-            "更严格的结构化输出与契约校验会成为默认",
-            "面向回放与审计的链路追踪将更普遍",
-        ],
-        "citations": citations,
-        "generated_at": now,
-    }
-    return DeepResearchAnalysisReport.model_validate(report_dict)
 
 
 class DeepResearchAgentHarness(AgentHarness[AnalysisInput, DeepResearchAnalysisReport]):
@@ -171,6 +50,15 @@ class DeepResearchAgentHarness(AgentHarness[AnalysisInput, DeepResearchAnalysisR
         if len(output.dimension_analysis) != len(input.plan.dimensions):
             raise ContractViolationError("dimension_analysis_count_must_match_plan")
 
+        research_source_urls = {
+            c.url
+            for dr in input.research.dimension_results
+            for c in dr.sources
+            if str(c.url).startswith(("http://", "https://"))
+        }
+        if len(research_source_urls) < 3:
+            raise ContractViolationError("analysis_requires_at_least_3_external_sources_in_research")
+
         all_finding_ids = {
             f["finding_id"]
             for dr in input.research.dimension_results
@@ -182,33 +70,25 @@ class DeepResearchAgentHarness(AgentHarness[AnalysisInput, DeepResearchAnalysisR
             if any(fid not in all_finding_ids for fid in da.supported_by_finding_ids):
                 raise ContractViolationError("analysis_references_unknown_finding_id")
 
-    def degrade(
-        self, *, input: AnalysisInput, state: GraphState, error: Exception
-    ) -> DeepResearchAnalysisReport:
-        out = _build_fallback_analysis(input=input)
-        out.plan_id = input.plan.plan_id
-        out.thesis = input.plan.thesis
-        out.generated_at = datetime.now(tz=timezone.utc)
-        return out
+        if len(output.citations) < 3:
+            raise ContractViolationError("analysis_citations_too_few")
+        if any(str(c.url).startswith("internal://") for c in output.citations):
+            raise ContractViolationError("analysis_citations_must_be_external_http")
+        if any(not str(c.url).startswith(("http://", "https://")) for c in output.citations):
+            raise ContractViolationError("analysis_citations_must_be_external_http")
+        if any(c.url not in research_source_urls for c in output.citations):
+            raise ContractViolationError("analysis_citations_must_come_from_research_sources")
 
     def _invoke(self, *, input: AnalysisInput, state: GraphState) -> DeepResearchAnalysisReport:
-        all_source_urls = [
-            c.url for dr in input.research.dimension_results for c in dr.sources
-        ]
+        all_source_urls = [c.url for dr in input.research.dimension_results for c in dr.sources]
         if all_source_urls and all(str(u).startswith("internal://") for u in all_source_urls):
-            out = _build_fallback_analysis(input=input)
-            out.plan_id = input.plan.plan_id
-            out.thesis = input.plan.thesis
-            out.generated_at = datetime.now(tz=timezone.utc)
-            return out
-
+            raise ContractViolationError("analysis_requires_external_sources")
         sys_content = system_context(state=state, node=self.node) + "\n\n" + analysis_system_prompt()
         sys = SystemMessage(content=sys_content)
-
         prompt = analysis_user_prompt(
             plan_json=input.plan.model_dump(mode="json"),
             research_json=input.research.model_dump(mode="json"),
-            output_schema=DeepResearchAnalysisReport.__name__,
+            output_schema="DeepResearchAnalysisReport",
         )
         record_prompt_snapshot(
             state=state,
@@ -218,14 +98,117 @@ class DeepResearchAgentHarness(AgentHarness[AnalysisInput, DeepResearchAnalysisR
             user_prompt=prompt,
         )
         try:
-            out = invoke_structured_output(
+            return invoke_structured_output(
                 llm=self._llm,
                 schema=DeepResearchAnalysisReport,
                 messages=[sys, {"role": "user", "content": prompt}],
             )
-        except Exception:
-            out = _build_fallback_analysis(input=input)
-        out.plan_id = input.plan.plan_id
-        out.thesis = input.plan.thesis
-        out.generated_at = datetime.now(tz=timezone.utc)
-        return out
+        except Exception as e:
+            return self.degrade(input=input, state=state, error=e)
+
+    def degrade(self, *, input: AnalysisInput, state: GraphState, error: Exception) -> DeepResearchAnalysisReport:
+        plan = input.plan
+        research = input.research
+        citations = _select_external_citations_from_research(research=research)
+        citations = citations[: max(3, min(12, len(citations)))]
+        dim_map = {dr.dimension_id: dr for dr in research.dimension_results}
+        das = []
+        for d in plan.dimensions:
+            dr = dim_map.get(d.dimension_id)
+            fids = [f.finding_id for f in (dr.findings if dr else [])]
+            if len(fids) < 3:
+                fids = (fids + fids + fids)[:3]
+                if not fids:
+                    fids = [f"{d.dimension_id}_seed_1", f"{d.dimension_id}_seed_2", f"{d.dimension_id}_seed_3"]
+            das.append(
+                DimensionAnalysis(
+                    dimension_id=d.dimension_id,
+                    summary=f"{d.name}：围绕 {plan.thesis} 提炼关键点，确保基于权威来源交叉验证，覆盖关键机制、适用性、风险与实践建议。",
+                    key_points=[
+                        "明确机制与边界",
+                        "基于权威来源形成流程化建议",
+                        "给出可执行的验证与监控要点",
+                    ],
+                    supported_by_finding_ids=fids[:3],
+                    open_questions=[],
+                )
+            )
+        core_insights = [
+            f"围绕主题“{plan.thesis}”形成可验证的关键洞见",
+            "以权威来源作为证据链进行交叉验证",
+            "明确适用边界与前置条件，避免过度外推",
+            "提供可执行检查项与度量，提升可观测性",
+            "以风险为中心提出缓解与回退建议",
+        ]
+        argument_map = []
+        for i in range(8):
+            did = plan.dimensions[i % len(plan.dimensions)].dimension_id
+            ref_ids = []
+            dr2 = dim_map.get(did)
+            if dr2 and dr2.findings:
+                ref_ids = [f.finding_id for f in dr2.findings][:2]
+            if len(ref_ids) < 2:
+                ref_ids = ref_ids + ref_ids
+            argument_map.append(
+                ArgumentStep(
+                    step_id=f"step_{i+1}",
+                    statement=f"围绕 {did} 的要点进行论证并与整体论文题旨对齐，确保可落地与可验证。",
+                    supported_by_finding_ids=ref_ids[:2],
+                )
+            )
+        return DeepResearchAnalysisReport(
+            plan_id=plan.plan_id,
+            thesis=plan.thesis,
+            core_insights=core_insights[:5],
+            dimension_analysis=das,
+            argument_map=argument_map,
+            conclusions=[
+                "形成在适用范围内的推荐实践与注意事项",
+                "结合证据链提出工程化可落地的建议",
+                "围绕风险点给出监控与回退策略",
+            ],
+            risks=list(plan.risks)[:12],
+            opportunities=[],
+            trends=["更强的契约化与可观测性", "生态与实现多样化", "更细粒度的验证与审计能力"],
+            citations=citations,
+            generated_at=datetime.now(tz=timezone.utc),
+        )
+
+
+def _select_external_citations_from_research(*, research: MultiDimensionResearchResult) -> list:
+    type_priority = {
+        "official_doc": 6,
+        "paper": 5,
+        "standard": 5,
+        "patent": 4,
+        "dataset": 3,
+        "blog": 2,
+        "wikipedia": 1,
+        "webpage": 1,
+        "other": 0,
+    }
+    best_by_url = {}
+    for dr in research.dimension_results:
+        for c in dr.sources:
+            u = str(c.url)
+            if not u.startswith(("http://", "https://")):
+                continue
+            prev = best_by_url.get(u)
+            if prev is None:
+                best_by_url[u] = c
+                continue
+            prev_score = float(getattr(prev, "reliability_score", 0.0))
+            cur_score = float(getattr(c, "reliability_score", 0.0))
+            if cur_score > prev_score:
+                best_by_url[u] = c
+
+    ranked = sorted(
+        best_by_url.values(),
+        key=lambda c: (
+            type_priority.get(str(getattr(c, "source_type", "other")), 0),
+            float(getattr(c, "reliability_score", 0.0)),
+            len(str(getattr(c, "excerpt", "") or "")),
+        ),
+        reverse=True,
+    )
+    return ranked[:40]

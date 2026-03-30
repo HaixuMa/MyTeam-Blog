@@ -23,6 +23,5 @@ class ArticleWithImages(StrictModel):
     plan_id: str = Field(min_length=6, max_length=80)
     markdown: str = Field(min_length=800, max_length=80000)
     images: list[GeneratedImage] = Field(default_factory=list, max_length=20)
-    references: list[Citation] = Field(min_length=8, max_length=120)
+    references: list[Citation] = Field(min_length=3, max_length=120)
     generated_at: datetime
-

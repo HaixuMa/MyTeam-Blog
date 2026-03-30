@@ -5,11 +5,13 @@ import re
 import socket
 import time
 import urllib.request
+import ssl
 from datetime import datetime, timezone
 from typing import Any, TypeVar
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from pydantic import BaseModel
+import certifi
 
 from schemas.state import GraphState
 
@@ -64,15 +66,25 @@ def invoke_structured_output(
 ) -> TModel:
     raw_cfg = getattr(llm, "_raw_openai_compatible", None)
     if isinstance(raw_cfg, dict) and raw_cfg.get("base_url") and raw_cfg.get("api_key") and raw_cfg.get("model"):
-        content = _raw_openai_compatible_chat(
-            base_url=str(raw_cfg["base_url"]),
-            api_key=str(raw_cfg["api_key"]),
-            model=str(raw_cfg["model"]),
-            temperature=float(raw_cfg.get("temperature", 0.2)),
-            timeout_s=float(raw_cfg.get("timeout_s", 60.0)),
-            messages=messages,
-        )
-        return _parse_content_to_schema(schema=schema, content=content)
+        try:
+            content = _raw_openai_compatible_chat(
+                base_url=str(raw_cfg["base_url"]),
+                api_key=str(raw_cfg["api_key"]),
+                model=str(raw_cfg["model"]),
+                temperature=float(raw_cfg.get("temperature", 0.2)),
+                timeout_s=float(raw_cfg.get("timeout_s", 60.0)),
+                messages=messages,
+            )
+            return _parse_content_to_schema(schema=schema, content=content)
+        except Exception as e:
+            try:
+                msg = llm.invoke(messages)
+                content = getattr(msg, "content", "")
+                if not isinstance(content, str):
+                    content = str(content)
+                return _parse_content_to_schema(schema=schema, content=content)
+            except Exception as e2:
+                raise RuntimeError(f"{e2}; raw={e}") from e2
 
     methods: list[str | None] = ["json_mode", "function_calling", None]
     last_error: Exception | None = None
@@ -132,55 +144,35 @@ def _raw_openai_compatible_chat(
         "model": model,
         "messages": oa_messages,
         "temperature": temperature,
-        "stream": True,
-        "max_tokens": 2048,
+        "stream": False,
+        "max_tokens": 4096,
     }
     req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST")
     req.add_header("Content-Type", "application/json")
-    req.add_header("Accept", "text/event-stream")
+    req.add_header("Accept", "application/json")
     req.add_header("Authorization", "Bearer " + api_key)
 
-    resp = urllib.request.urlopen(req, timeout=timeout_s)
-    try:
-        sock = resp.fp.raw._sock
-        sock.settimeout(2.0)
-    except Exception:
-        pass
-
-    text_parts: list[str] = []
-    started = time.time()
-    while time.time() - started < timeout_s:
-        try:
-            line = resp.readline()
-        except socket.timeout:
-            continue
-        if not line:
-            break
-        s = line.decode("utf-8", "replace").strip()
-        if not s or not s.startswith("data:"):
-            continue
-        payload = s[5:].strip()
-        if payload == "[DONE]":
-            break
-        try:
-            obj = json.loads(payload)
-        except Exception:
-            continue
-        choices = obj.get("choices") or []
-        if not choices:
-            continue
-        ch0 = choices[0] or {}
-        delta = ch0.get("delta") or {}
-        c = delta.get("content")
-        if isinstance(c, str) and c:
-            text_parts.append(c)
-        else:
-            rc = delta.get("reasoning_content")
-            if isinstance(rc, str) and rc:
-                text_parts.append(rc)
-        if ch0.get("finish_reason"):
-            break
-    return "".join(text_parts).strip()
+    ctx = ssl.create_default_context(cafile=certifi.where())
+    resp = urllib.request.urlopen(req, timeout=timeout_s, context=ctx)
+    raw = resp.read().decode("utf-8", errors="replace")
+    obj = json.loads(raw) if raw.strip() else {}
+    if isinstance(obj, dict) and obj.get("error"):
+        err = obj.get("error")
+        if isinstance(err, (dict, list)):
+            raise RuntimeError(json.dumps(err, ensure_ascii=False)[:1200])
+        raise RuntimeError(str(err)[:1200])
+    choices = obj.get("choices") or []
+    if not choices:
+        raise RuntimeError(f"no_choices: {raw[:1200]}")
+    msg = (choices[0] or {}).get("message") or {}
+    c = msg.get("content")
+    if isinstance(c, str) and c.strip():
+        return c.strip()
+    rc = msg.get("reasoning_content")
+    if isinstance(rc, str) and rc.strip():
+        return rc.strip()
+    text = str(c or rc or "").strip()
+    return text
 
 
 def _extract_json(text: str) -> str:

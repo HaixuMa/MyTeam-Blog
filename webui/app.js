@@ -204,6 +204,33 @@ function renderTaskPanel(data) {
     })
     .join("");
 
+  const execDetail = exec
+    .slice(-10)
+    .map((e) => {
+      const ts = escapeHTML((e.timestamp || "").slice(11, 19) || "-");
+      const role = escapeHTML(e.role || "-");
+      const node = escapeHTML(e.node || "-");
+      const st = escapeHTML(e.status || "-");
+      const msg = escapeHTML(e.message || "-");
+      const err = e.error_message ? ` · ${escapeHTML(String(e.error_message).slice(0, 160))}` : "";
+      const out = e.output_summary ? `\n${escapeHTML(String(e.output_summary).slice(0, 420))}` : "";
+      return `<div class="list-item">${ts} · ${role} · ${node} · ${st} · ${msg}${err}${out ? `<pre style="margin:8px 0 0 0; white-space:pre-wrap">${out}</pre>` : ""}</div>`;
+    })
+    .join("");
+
+  const prompts = Array.isArray(data.prompt_history_tail) ? data.prompt_history_tail : [];
+  const promptDetail = prompts
+    .slice(-6)
+    .map((p) => {
+      const ts = escapeHTML((p.timestamp || "").slice(11, 19) || "-");
+      const node = escapeHTML(p.node || "-");
+      const role = escapeHTML(p.role || "-");
+      const sys = escapeHTML(String(p.system_prompt || "").slice(0, 1600));
+      const usr = escapeHTML(String(p.user_prompt || "").slice(0, 1600));
+      return `<div class="list-item">${ts} · ${role} · ${node}<pre style="margin:8px 0 0 0; white-space:pre-wrap">SYSTEM:\n${sys}\n\nUSER:\n${usr}</pre></div>`;
+    })
+    .join("");
+
   el.innerHTML = `
     <div class="kv">
       <div class="k">status</div><div class="v">${escapeHTML(safeText(status))} ${escapeHTML(halted)}</div>
@@ -215,6 +242,16 @@ function renderTaskPanel(data) {
     </div>
     <div class="progress"><div style="width:${pct}%"></div></div>
     <div class="list">${fatal ? `<div class="list-item">${escapeHTML(fatal)}</div>` : ""}${listHtml}${agentHtml}</div>
+    ${
+      execDetail
+        ? `<details style="margin-top:12px"><summary>阶段运行信息</summary><div class="list" style="margin-top:8px">${execDetail}</div></details>`
+        : ""
+    }
+    ${
+      promptDetail
+        ? `<details style="margin-top:12px"><summary>提示快照（system/user）</summary><div class="list" style="margin-top:8px">${promptDetail}</div></details>`
+        : ""
+    }
   `;
 }
 

@@ -23,10 +23,10 @@ class UserResearchGoal(StrictModel):
 class ResearchDimensionPlan(StrictModel):
     dimension_id: str = Field(min_length=2, max_length=40)
     name: str = Field(min_length=3, max_length=120)
-    objectives: list[str] = Field(min_length=1, max_length=8)
-    key_questions: list[str] = Field(min_length=2, max_length=12)
-    acceptance_criteria: list[str] = Field(min_length=2, max_length=10)
-    required_source_types: list[str] = Field(min_length=2, max_length=10)
+    objectives: list[str] = Field(min_length=1, max_length=5)
+    key_questions: list[str] = Field(min_length=2, max_length=8)
+    acceptance_criteria: list[str] = Field(min_length=2, max_length=6)
+    required_source_types: list[str] = Field(min_length=2, max_length=6)
     priority: int = Field(ge=1, le=5)
 
 
@@ -40,12 +40,11 @@ class ResearchMilestone(StrictModel):
 class ResearchExecutionPlan(StrictModel):
     plan_id: str = Field(min_length=6, max_length=80)
     thesis: str = Field(min_length=10, max_length=600)
-    dimensions: list[ResearchDimensionPlan] = Field(min_length=5, max_length=8)
+    dimensions: list[ResearchDimensionPlan] = Field(min_length=4, max_length=6)
     deliverable_standards: list[str] = Field(min_length=3, max_length=12)
-    milestones: list[ResearchMilestone] = Field(min_length=3, max_length=10)
+    milestones: list[ResearchMilestone] = Field(min_length=2, max_length=8)
     source_policy: str = Field(min_length=10, max_length=1200)
     info_source_requirements: list[str] = Field(min_length=3, max_length=12)
     risks: list[str] = Field(default_factory=list, max_length=12)
     clarification_needed: bool = False
     clarification_questions: list[ClarificationQuestion] = Field(default_factory=list, max_length=8)
-

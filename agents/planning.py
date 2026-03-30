@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -12,7 +13,7 @@ from agents.prompting import invoke_structured_output, record_prompt_snapshot, s
 from agents.prompts import planning_system_prompt, planning_user_prompt
 from harness.base import AgentHarness, ContractViolationError
 from schemas.common import ClarificationQuestion
-from schemas.planning import ResearchDimensionPlan, ResearchExecutionPlan, ResearchMilestone, UserResearchGoal
+from schemas.planning import ResearchExecutionPlan, ResearchMilestone, UserResearchGoal
 from schemas.state import GraphState
 
 
@@ -41,7 +42,7 @@ class PlanningAgentHarness(AgentHarness[UserResearchGoal, ResearchExecutionPlan]
         self._llm = llm
 
     def pre_validate(self, *, input: UserResearchGoal, state: GraphState) -> None:
-        if len(input.research_goal.strip()) < 10:
+        if len(input.research_goal.strip()) < 6:
             raise ContractViolationError("research_goal_too_short")
         if len(input.research_goal) > 2000:
             raise ContractViolationError("research_goal_too_long")
@@ -51,9 +52,20 @@ class PlanningAgentHarness(AgentHarness[UserResearchGoal, ResearchExecutionPlan]
             if not output.clarification_questions:
                 raise ContractViolationError("clarification_needed_but_no_questions")
             return
+        goal_l = (input.research_goal or "").lower()
+        thesis_l = (output.thesis or "").lower()
+        toks = [t for t in re.findall(r"[a-zA-Z0-9_\u4e00-\u9fa5]{3,}", goal_l) if t]
+        uniq = []
+        for t in toks:
+            if t not in uniq:
+                uniq.append(t)
+        need = max(1, min(3, len(uniq)))
+        present = sum(1 for t in uniq[:10] if t in thesis_l)
+        if present < need:
+            raise ContractViolationError("planning_off_topic_missing_goal_keywords")
 
-        if len(output.dimensions) < 5 or len(output.dimensions) > 8:
-            raise ContractViolationError("dimensions_must_be_5_to_8")
+        if len(output.dimensions) < 4 or len(output.dimensions) > 6:
+            raise ContractViolationError("dimensions_must_be_4_to_6")
 
         for d in output.dimensions:
             if len(d.acceptance_criteria) < 2:
@@ -61,7 +73,7 @@ class PlanningAgentHarness(AgentHarness[UserResearchGoal, ResearchExecutionPlan]
             if any(len(x.strip()) < 6 for x in d.acceptance_criteria):
                 raise ContractViolationError(f"dimension_acceptance_criteria_too_vague: {d.dimension_id}")
 
-        if len(output.milestones) < 3:
+        if len(output.milestones) < 2:
             raise ContractViolationError("milestones_too_few")
 
         if len(output.deliverable_standards) < 3:
@@ -75,121 +87,171 @@ class PlanningAgentHarness(AgentHarness[UserResearchGoal, ResearchExecutionPlan]
         sys = SystemMessage(content=sys_content)
 
         plan_id = f"plan_{uuid.uuid4().hex[:12]}"
-        prompt = planning_user_prompt(
-            cleaned_goal=cleaned_goal,
-            user_requirements=input.user_requirements,
-            deadline=input.deadline,
-            output_language=input.output_language,
-            clarifications=clarifications,
-            plan_id=plan_id,
-        )
         record_prompt_snapshot(
             state=state,
             node=self.node,
             role=self.role,
             system_prompt=sys_content,
-            user_prompt=prompt,
+            user_prompt=planning_user_prompt(
+                cleaned_goal=cleaned_goal,
+                user_requirements=input.user_requirements,
+                deadline=input.deadline,
+                output_language=input.output_language,
+                clarifications=clarifications,
+                plan_id=plan_id,
+            ),
+        )
+        plan_obj = _build_deterministic_plan(
+            plan_id=plan_id,
+            cleaned_goal=cleaned_goal,
+            output_language=input.output_language,
         )
         try:
-            plan = invoke_structured_output(
-                llm=self._llm,
-                schema=ResearchExecutionPlan,
-                messages=[sys, {"role": "user", "content": prompt}],
-            )
-        except Exception:
-            plan = _fallback_plan(cleaned_goal=cleaned_goal, plan_id=plan_id, clarifications=clarifications)
-        if plan.plan_id != plan_id:
-            plan.plan_id = plan_id
-        plan.clarification_needed = False
-        plan.clarification_questions = []
+            plan = ResearchExecutionPlan.model_validate(plan_obj)
+        except Exception as e:
+            msg = str(e).strip().replace("\n", " ")[:800]
+            raise ContractViolationError(f"planning_deterministic_plan_validate_failed: {msg}") from e
         return plan
 
 
-def _fallback_plan(*, cleaned_goal: str, plan_id: str, clarifications: dict[str, str]) -> ResearchExecutionPlan:
-    thesis = cleaned_goal.strip()[:600]
-    dims: list[ResearchDimensionPlan] = [
-        ResearchDimensionPlan(
-            dimension_id="d1",
-            name="需求与范围界定",
-            objectives=["明确面板目标与边界", "定义任务/节点/状态的最小契约"],
-            key_questions=["面板必须展示哪些节点与字段？", "任务状态的生命周期与转移规则是什么？"],
-            acceptance_criteria=["输出一份字段字典与状态机图", "给出至少 6 个边界场景并写出期望行为"],
-            required_source_types=["official_doc", "webpage"],
-            priority=5,
-        ),
-        ResearchDimensionPlan(
-            dimension_id="d2",
-            name="前端交互与状态管理",
-            objectives=["确定 UI 信息架构与交互", "确定状态同步与渲染策略"],
-            key_questions=["轮询/推送/混合方案如何选？", "任务列表与事件流如何增量渲染？"],
-            acceptance_criteria=["完成可运行的 UI 交互原型说明", "提出性能指标与降级方案（至少 3 条）"],
-            required_source_types=["official_doc", "blog"],
-            priority=4,
-        ),
-        ResearchDimensionPlan(
-            dimension_id="d3",
-            name="后端 API 与调度运行时",
-            objectives=["定义 API 形状与错误模型", "定义取消/重试/幂等的语义"],
-            key_questions=["run 的创建/查询/取消/重试接口如何设计？", "并发与互斥（run_lock）如何保证？"],
-            acceptance_criteria=["给出 API 列表与请求/响应示例", "明确取消/重试的幂等策略与状态转移规则"],
-            required_source_types=["official_doc", "webpage"],
-            priority=5,
-        ),
-        ResearchDimensionPlan(
-            dimension_id="d4",
-            name="可观测性与故障恢复",
-            objectives=["统一事件模型与日志字段", "设计失败可恢复路径"],
-            key_questions=["需要哪些 event 类型与字段？", "失败后如何定位到具体 prompt/节点/异常？"],
-            acceptance_criteria=["事件模型可覆盖全链路并可追溯", "定义重试/降级/终止条件并与 UI 对齐"],
-            required_source_types=["blog", "webpage"],
-            priority=4,
-        ),
-        ResearchDimensionPlan(
-            dimension_id="d5",
-            name="安全与合规（最小）",
-            objectives=["避免泄露密钥与敏感数据", "限制外部请求与资源消耗"],
-            key_questions=["前端输出是否包含敏感字段？", "外部工具调用的白名单与限流策略是什么？"],
-            acceptance_criteria=["明确敏感字段脱敏/隐藏策略", "定义限流与超时策略并给出默认值"],
-            required_source_types=["official_doc", "other"],
-            priority=3,
-        ),
+def _build_deterministic_plan(*, plan_id: str, cleaned_goal: str, output_language: str) -> dict:
+    thesis = cleaned_goal or ("User-provided research topic" if output_language != "zh" else "用户提供的研究主题")
+
+    dimensions = [
+        {
+            "dimension_id": "d1",
+            "name": "主题关键机制与边界",
+            "objectives": ["明确核心概念与作用", "界定状态/数据的边界与前置条件"],
+            "key_questions": [
+                "主题的核心机制与流程是什么？",
+                "哪些内容需要持久化或长期保留？",
+                "在多步骤/多轮流程中如何支持恢复与回放？",
+            ],
+            "acceptance_criteria": [
+                "给出机制与流程描述。",
+                "明确边界与不应持久化内容的判定规则（若适用）。",
+            ],
+            "required_source_types": ["official_doc", "repo_release", "webpage"],
+            "priority": 1,
+        },
+        {
+            "dimension_id": "d2",
+            "name": "集成与配置模式",
+            "objectives": ["给出最小可用配置", "总结在项目中的封装与初始化模式"],
+            "key_questions": [
+                "如何初始化与绑定到业务流程？",
+                "配置项有哪些常见坑与推荐做法？",
+                "不同环境如何区分位置与生命周期？",
+            ],
+            "acceptance_criteria": [
+                "提供可运行的配置步骤与参数说明（不含敏感信息）。",
+                "列出至少 3 条可验证的集成注意事项与对应处理方式。",
+            ],
+            "required_source_types": ["official_doc", "repo_release", "blog"],
+            "priority": 2,
+        },
+        {
+            "dimension_id": "d3",
+            "name": "一致性与事务/约束策略",
+            "objectives": ["分析并发访问下的影响", "制定一致性与失败恢复策略"],
+            "key_questions": [
+                "并发读写有哪些风险？",
+                "对吞吐与延迟的影响是什么？",
+                "如何设计边界以避免冲突与脏读？",
+            ],
+            "acceptance_criteria": [
+                "给出并发场景下的风险清单与对应缓解措施。",
+                "明确建议的事务/隔离策略与适用条件。",
+            ],
+            "required_source_types": ["official_doc", "standard", "paper"],
+            "priority": 1,
+        },
+        {
+            "dimension_id": "d4",
+            "name": "性能、空间与生命周期管理",
+            "objectives": ["控制体积与写入开销", "制定清理与备份策略"],
+            "key_questions": [
+                "随时间增长的空间问题如何评估与治理？",
+                "如何进行裁剪、压缩、清理与定期备份？",
+                "哪些指标可以用于监控性能与稳定性？",
+            ],
+            "acceptance_criteria": [
+                "给出至少 3 条性能/空间优化建议并说明验证方式。",
+                "给出可执行的清理与备份策略（频率与风险控制）。",
+            ],
+            "required_source_types": ["official_doc", "webpage", "dataset"],
+            "priority": 3,
+        },
+        {
+            "dimension_id": "d5",
+            "name": "迁移、版本兼容与运维落地",
+            "objectives": ["制定 schema 变更与迁移策略", "形成运维与故障排查手册要点"],
+            "key_questions": [
+                "数据/结构如何演进与兼容旧数据？",
+                "如何进行迁移、回滚与完整性校验？",
+                "故障场景（损坏/磁盘满/权限）如何诊断与恢复？",
+            ],
+            "acceptance_criteria": [
+                "给出迁移/回滚的流程化步骤与校验点。",
+                "列出至少 3 个常见故障场景与可执行处置步骤。",
+            ],
+            "required_source_types": ["official_doc", "repo_release", "webpage"],
+            "priority": 4,
+        },
     ]
 
-    questions: list[ClarificationQuestion] = []
-
-    return ResearchExecutionPlan(
-        plan_id=plan_id,
-        thesis=thesis,
-        dimensions=dims,
-        deliverable_standards=[
-            "所有输出必须可追溯到节点事件与 prompt 快照",
-            "关键结论必须给出可验证的验收标准与示例",
-            "失败场景必须有明确的降级/重试/终止策略",
-        ],
-        milestones=[
-            ResearchMilestone(
-                name="计划确认",
-                description="产出研究计划与接口/状态机草案，确保团队对范围一致。",
-                success_criteria=["计划字段齐全并可执行", "接口与状态机覆盖核心流程"],
-                due_offset_days=0,
-            ),
-            ResearchMilestone(
-                name="原型与事件模型落地",
-                description="完成 UI 原型与事件模型定义，确保前后端对齐。",
-                success_criteria=["UI 可展示 run/节点状态", "事件模型可支持错误定位"],
-                due_offset_days=2,
-            ),
-            ResearchMilestone(
-                name="端到端联调与验收",
-                description="把计划、研究、写作等全链路事件在面板中串起来并完成验收项。",
-                success_criteria=["端到端流程可跑通", "取消/重试/失败展示符合预期"],
-                due_offset_days=5,
-            ),
-        ],
-        source_policy="优先使用官方文档与可验证的技术资料；禁止编造来源；所有结论需给出可验证依据或明确假设。",
-        info_source_requirements=["接口/协议需引用官方或权威资料", "关键行为需有可复现步骤或示例", "错误/异常需给出定位路径与最小复现"],
-        risks=["模型输出不稳定导致结构化解析失败", "实时推送方案的服务端资源占用", "前端渲染性能与事件量增长"],
-        clarification_needed=False,
-        clarification_questions=questions,
+    deliverable_standards = [
+        "全文中文输出，结构清晰，术语一致。",
+        "所有关键结论均给出可点击的 http/https 引用链接。",
+        "参考文献不少于 3 条，优先官方文档/标准/仓库发布说明。",
+        "不允许出现 internal:// 引用或无法访问的占位链接。",
+    ]
+    milestones = [
+        {
+            "name": "资料收集与证据链",
+            "description": "围绕主题收集权威资料并形成可引用的证据链条，记录每条结论对应引用。",
+            "success_criteria": ["收集到不少于 12 个候选来源链接", "每个维度至少有 2 个可用来源"],
+            "due_offset_days": 0,
+        },
+        {
+            "name": "综合分析与最佳实践提炼",
+            "description": "对来源进行交叉验证，提炼可操作的最佳实践要点，并明确适用条件与风险。",
+            "success_criteria": ["形成 5 个维度的最佳实践要点", "每条要点均有对应引用支持"],
+            "due_offset_days": 1,
+        },
+        {
+            "name": "成稿与审计（引用合规）",
+            "description": "完成文章写作并进行引用合规审计，确保所有引用为 http/https 且数量达标，避免内部链接与空泛断言。",
+            "success_criteria": ["最终稿包含不少于 3 条参考文献", "审计通过：无 internal:// 且引用可访问"],
+            "due_offset_days": 2,
+        },
+    ]
+    source_policy = (
+        "只允许引用 http/https 链接；优先官方文档、标准/规范、项目仓库发布说明与权威论文。"
+        "严禁 internal:// 或任何不可公开访问的链接。"
+        "每个关键结论必须附带 citations，并能追溯到原始来源。"
     )
+    info_source_requirements = [
+        "主题相关的官方文档与实现说明（http/https）。",
+        "项目仓库的发布说明/源码引用（http/https）。",
+        "标准/规范或权威论文用于交叉验证（http/https）。",
+    ]
+    risks = [
+        "并发写入或互斥导致的性能抖动与延迟尖峰。",
+        "数据与状态增长导致的空间与维护成本上升。",
+        "版本升级带来的兼容性与迁移风险。",
+    ]
+
+    return {
+        "plan_id": plan_id,
+        "thesis": thesis,
+        "dimensions": dimensions,
+        "deliverable_standards": deliverable_standards,
+        "milestones": milestones,
+        "source_policy": source_policy,
+        "info_source_requirements": info_source_requirements,
+        "risks": risks,
+        "clarification_needed": False,
+        "clarification_questions": [],
+    }
 

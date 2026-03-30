@@ -107,7 +107,11 @@ class HarnessOrchestrator:
 
     def run_step(self, *, state: GraphState) -> OrchestratorResult:
         last_state: GraphState = state
+        first = True
         for updated in self._app.stream(state, config=_thread_config(state["trace_id"]), stream_mode="values"):
+            if first:
+                first = False
+                continue
             last_state = updated
             break
         return _result_from_state(last_state)
@@ -605,4 +609,4 @@ def _result_from_state(state: GraphState) -> OrchestratorResult:
         report = AuditReport.model_validate(state["audit_report"])
         if report.passed:
             return OrchestratorResult(state=state, status="completed")
-    return OrchestratorResult(state=state, status="completed")
+    return OrchestratorResult(state=state, status="failed")

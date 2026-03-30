@@ -91,7 +91,13 @@ def load_config(project_root: Path) -> AppConfig:
         os.getenv("CHECKPOINT_SQLITE_PATH", str(data_dir / "checkpoints.sqlite3"))
     ).resolve()
 
-    extra_body = _env_json_dict("MODEL_EXTRA_BODY_JSON")
+    extra_body = _env_json_dict("MODEL_EXTRA_BODY_JSON") or {}
+    enable_thinking = _env_bool("MODEL_ENABLE_THINKING")
+    if enable_thinking is not None:
+        extra_body["enable_thinking"] = enable_thinking
+    thinking_budget_raw = os.getenv("MODEL_THINKING_BUDGET")
+    if thinking_budget_raw is not None and thinking_budget_raw.strip() != "":
+        extra_body["thinking_budget"] = int(thinking_budget_raw)
     model_extra_body = extra_body or None
 
     return AppConfig(
@@ -104,7 +110,7 @@ def load_config(project_root: Path) -> AppConfig:
         model_temperature=_env_float("MODEL_TEMPERATURE", 0.2),
         model_base_url=os.getenv("MODEL_BASE_URL") or None,
         model_extra_body=model_extra_body,
-        request_timeout_s=_env_float("REQUEST_TIMEOUT_S", 60.0),
+        request_timeout_s=_env_float("REQUEST_TIMEOUT_S", 180.0),
         image_provider=os.getenv("IMAGE_PROVIDER", "openai").strip().lower(),
         image_model=os.getenv("IMAGE_MODEL", "dall-e").strip(),
         image_base_url=os.getenv("IMAGE_BASE_URL") or None,
@@ -118,6 +124,6 @@ def load_config(project_root: Path) -> AppConfig:
         max_audit_rounds=_env_int("MAX_AUDIT_ROUNDS", 2),
         max_total_node_steps=_env_int("MAX_TOTAL_NODE_STEPS", 60),
         max_node_visits_per_node=_env_int("MAX_NODE_VISITS_PER_NODE", 6),
-        tool_rate_limit_per_minute=_env_int("TOOL_RATE_LIMIT_PER_MINUTE", 20),
+        tool_rate_limit_per_minute=_env_int("TOOL_RATE_LIMIT_PER_MINUTE", 200),
     )
 

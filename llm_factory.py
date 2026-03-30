@@ -60,11 +60,10 @@ def create_chat_model(cfg: AppConfig) -> tuple[BaseChatModel, ModelInfo]:
             "temperature": cfg.model_temperature,
             "timeout": cfg.request_timeout_s,
             "base_url": cfg.model_base_url,
-            "streaming": True,
+            "streaming": False,
+            "max_tokens": 4096,
         }
         eb = dict(cfg.model_extra_body or {})
-        eb.pop("enable_thinking", None)
-        eb.pop("thinking_budget", None)
         extra_body = eb or None
         if extra_body:
             try:

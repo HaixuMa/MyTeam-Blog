@@ -275,9 +275,19 @@ T = TypeVar("T")
 
 
 def _invoke_with_timeout(*, fn: Callable[[], T], timeout_s: float) -> T:
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        fut = ex.submit(fn)
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    fut = ex.submit(fn)
+    try:
         return fut.result(timeout=timeout_s)
+    except concurrent.futures.TimeoutError as e:
+        fut.cancel()
+        ex.shutdown(wait=False, cancel_futures=True)
+        raise TimeoutError("agent_invoke_timeout") from e
+    finally:
+        try:
+            ex.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
 
 
 def _safe_model_summary(model: BaseModel) -> str:

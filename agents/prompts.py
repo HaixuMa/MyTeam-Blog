@@ -12,7 +12,8 @@ def planning_system_prompt() -> str:
         "无论是否需要澄清，你都必须输出完整的 ResearchExecutionPlan（包含所有必填字段）。"
         "如果研究目标模糊/范围过大/不可执行，设置 clarification_needed=true，"
         "并提供 3-8 个可回答的澄清问题，同时仍给出一个可执行的暂定计划。"
-        "必须生成可执行的研究执行计划书：5-8 个研究维度，每个维度包含清晰验收标准。"
+        "必须生成可执行的研究执行计划书：4-6 个研究维度，每个维度包含清晰验收标准。"
+        "为避免模型输出被截断，每个维度的 objectives/key_questions/acceptance_criteria/required_source_types 必须保持精炼。"
         "禁止输出无来源要求或模糊里程碑。"
         "输出必须是单个 JSON 对象（不是数组/列表），不要 Markdown，不要解释。"
     )
@@ -35,7 +36,8 @@ def planning_user_prompt(
         f"已有澄清答案（如有）：{clarifications}\n\n"
         f"plan_id（必须原样返回）：{plan_id}\n\n"
         "请生成 ResearchExecutionPlan。plan_id 必须使用提供的 plan_id 字段。\n"
-        "字段要求（必须齐全）：plan_id, thesis, dimensions(5-8), deliverable_standards, milestones, source_policy, info_source_requirements, risks, clarification_needed, clarification_questions。\n"
+        "字段要求（必须齐全）：plan_id, thesis, dimensions(4-6), deliverable_standards, milestones, source_policy, info_source_requirements, risks, clarification_needed, clarification_questions。\n"
+        "维度字段建议：objectives 2-4 条；key_questions 2-6 条；acceptance_criteria 2-5 条；required_source_types 2-5 条。\n"
         "如果信息不足，优先做合理假设并生成可执行计划；仅在确实无法执行时才设置 clarification_needed=true。\n"
         "输出必须是单个 JSON 对象，且只能输出 JSON。"
     )
@@ -109,7 +111,7 @@ def writing_user_prompt(*, plan_json: dict[str, Any], analysis_json: dict[str, A
         "- markdown 使用中文，标题层级规范；\n"
         "- 引用必须来自 analysis.citations（引用信息放入 references）；\n"
         "- 文章中每个需要配图的段落插入 [[FIG:...]] 锚点；\n"
-        "- 参考文献章节必须列出 references（至少 8 条）。"
+        "- 参考文献章节必须列出 references（至少 3 条）。"
     )
 
 
